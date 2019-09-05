@@ -1,15 +1,16 @@
  /*	
  *
  * 	BACKLOG ITEM:
- * 		->	BUTLER deve poter spostare oggetti e cibo da una RESOURCE ad un altra
- * 		->	BUTLER deve poter memorizzare che oggetti portare dove [task: PREPARE]
- * 		->	Raggruppare le funzioni prolog in un solo file
+ * 		->	7
+ * 		->	8
+ * 		->	18
+ *		->	22
  * 
  * 	MODIFICHE DA SPRINT RETROSPECTIVE PRECEDENTI:
  * 		->	le azioni adesso hanno 5 argomenti
  * 		->	le funzioni in prolog sono state spostate in un file dataFunctions.pl e ripulite
  * 		->	il pathfinder prende la configurazione da un file pathfinderConfig.pl
- * 		->	l'esecuzione delle azioni è delegata ad attori specifici, non più hard-coded nel butler
+ * 		->	l'esecuzione delle azioni Ã¨ delegata ad attori specifici, non piÃ¹ hard-coded nel butler
  * 
  * 	SPRINT GOAL:
  *		->	il butler deve poter spostare oggetti da una resource ad un'altra
