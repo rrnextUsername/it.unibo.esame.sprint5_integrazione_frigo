@@ -1,0 +1,441 @@
+ /*	
+ *
+ * 	BACKLOG ITEM:
+ * 		->	BUTLER deve poter spostare oggetti e cibo da una RESOURCE ad un altra
+ * 		->	BUTLER deve poter memorizzare che oggetti portare dove [task: PREPARE]
+ * 		->	Raggruppare le funzioni prolog in un solo file
+ * 
+ * 	MODIFICHE DA SPRINT RETROSPECTIVE PRECEDENTI:
+ * 		->	le azioni adesso hanno 5 argomenti
+ * 		->	le funzioni in prolog sono state spostate in un file dataFunctions.pl e ripulite
+ * 		->	il pathfinder prende la configurazione da un file pathfinderConfig.pl
+ * 		->	l'esecuzione delle azioni è delegata ad attori specifici, non più hard-coded nel butler
+ * 
+ * 	SPRINT GOAL:
+ *		->	il butler deve poter spostare oggetti da una resource ad un'altra
+ * 		->	il butler deve poter aggiungere oggetti ad una resource
+ *		->	il butler deve poter rimuovere oggetti da una resource
+ */ 
+ 
+ 
+ 
+ System butler 
+ 
+mqttBroker "localhost" : 1883    //192.168.1.18  192.168.43.229
+
+// 	MESSAGGI FRONTEND
+Event 		stopAppl			:	stopAppl
+Event 		reactivateAppl		:	reactivateAppl
+Dispatch	cmd					:	cmd( CMD, ARG1 )
+
+//	MESSAGGI SOLVER 
+Dispatch	actionComplete		:	actionComplete( STATUS )
+Dispatch	actionContinue		: 	actionContinue( CMD, ARG1 )
+Dispatch	allActionsDone		: 	allActionsDone
+
+Dispatch	add					:	add( INVENTORY, NAME, CATEGORY )
+Dispatch	remove				:	remove( INVENTORY, NAME, CATEGORY )
+Dispatch	swap				:	swap ( INVENTORY1, INVENTORY2, NAME, CATEGORY )
+
+
+//	MESSAGGI FRIDGE_HANDLER
+Event		missingFood			:	missingFood( FOOD )
+Dispatch	replyFridge			:	replyFridge( STATUS )
+Dispatch	msgFridge			:	msgFridge( ACTION, NAME, CATEGORY ) 
+
+//	MESSAGGI TESTING
+Dispatch	check				: 	check( NUMBER )
+Dispatch	wait				: 	wait( TIME )
+
+//	MESSAGGI FRIDGE <-> FRONTEND
+Event		modelContent		:	modelContent( CONTENT ) 
+Event 		exposeFood			:	exposeFood
+
+Context ctxButler      	ip [host="localhost"    port=8038]   -mqtt
+
+//-----------------------------------------------------------------
+//-------------------------BUTLER----------------------------------
+//-----------------------------------------------------------------
+
+QActor butler_solver context ctxButler{
+	["var messageRecognized: Boolean= false"]
+		
+	State s0 initial {
+		solve( consult( "sysRules.pl" )	 )
+		 
+		solve( consult( "roomState.pl" ) )
+		
+		solve( consult("cmds.pl")	 )		
+		solve( consult("solverModel.pl") )		
+		
+		solve( consult( "dataFunctions.pl" ) )
+		
+		solve( showRoomState )		
+		
+		solve( inventario(tableInv, L ))				
+		["var TableInv = getCurSol(\"L\").toString()"]
+		solve( inventario(butlerInv, L ))				
+		["var ButlerInv = getCurSol(\"L\").toString()"]
+		solve( inventario(pantryInv, L ))				
+		["var PantryInv = getCurSol(\"L\").toString()"]
+		solve( inventario(dishwasherInv, L ))				
+		["var DishwasherInv = getCurSol(\"L\").toString()"]
+		
+		run itunibo.robot.resourceModelSupport.updateRoomModel( myself, "tableInv", TableInv)
+		run itunibo.robot.resourceModelSupport.updateRoomModel( myself, "butlerInv", ButlerInv)
+		run itunibo.robot.resourceModelSupport.updateRoomModel( myself, "pantryInv", PantryInv)
+		run itunibo.robot.resourceModelSupport.updateRoomModel( myself, "dishwasherInv", DishwasherInv)
+	}Goto waitCmd
+	
+	State waitCmd{		
+		solve( aggiornaStato( waitCmd , waiting , waiting ) )
+	}  Transition t0 whenMsg cmd -> solveCmd
+	
+	State solveCmd{	
+		onMsg(cmd: cmd (CMD, ARG1 )){
+			printCurrentMessage
+			solve( aggiornaStato( solveCmd , $payloadArg(0) , $payloadArg(1) ) )	
+					
+			solve( comando( $payloadArg(0), $payloadArg(1) ))				
+			println(currentSolution)
+		}		
+	} Goto solveAction
+	
+	State solveAction{	
+		solve( showSolverState )
+			
+		solve( retract( azione( ACTION, ARG1, ARG2, ARG3, ARG4 ) ))
+		println(currentSolution)
+		
+		if "currentSolution.isSuccess()"{		
+			["val Action= currentSolution.getVarValue(\"ACTION\").toString()"]
+				
+			if "Action == \"notificaFrigo\" "{
+				forward butler_fridge_handler -m msgFridge : msgFridge( #ARG1, #ARG2, #ARG3 )			
+			}
+			if "Action == \"aggiungiOggetto\" "{
+				forward butler_solver -m add : add( #ARG1, #ARG2, #ARG3 )				
+			}
+			if "Action == \"spostaOggetto\" "{
+				forward butler_solver -m swap : swap( #ARG1, #ARG2, #ARG3, #ARG4 )				
+			}
+			if "Action == \"rimuoviOggetto\" "{
+				forward butler_solver -m remove : remove( #ARG1, #ARG2, #ARG3 )				
+			}
+			if "Action == \"check\" "{
+				forward butler_test_handler -m check : check( #ARG1 )				
+			}
+			if "Action == \"wait\" "{
+				forward butler_test_handler -m wait : wait( #ARG1 )				
+			}
+			if "Action == \"continuaPiano\" "{
+				forward butler_solver -m actionContinue : actionContinue( #ARG1, #ARG2 )				
+			}
+		} else {
+			forward butler_solver -m allActionsDone : allActiobutler_solver
+		}		
+	} Goto wait
+					
+	State wait{			
+	}Transition t0 	whenMsg		add				->	handleAddAction
+					whenMsg		remove			->	handleRemoveAction
+					whenMsg		swap			->	handleSwapAction
+					whenEvent 	stopAppl 		-> 	stoppedSolvedAction
+					whenMsg 	actionComplete 	-> 	completeAction
+					whenMsg 	actionContinue 	-> 	completeAction
+					whenMsg 	allActionsDone 	-> 	waitCmd	
+	
+	State handleAddAction{
+		onMsg ( add : add( INVENTARIO , NOME , CATEGORIA ) ){
+			printCurrentMessage
+			
+			solve ( aggiungi( $payloadArg(0), $payloadArg(1), $payloadArg(2) ) )			
+			solve ( assert( done( handleAdd, $payloadArg(0), $payloadArg(1), $payloadArg(2) ) ) ) // testing function
+						
+			solve( inventario($payloadArg(0), L ))				
+			["var Inv = getCurSol(\"L\").toString()"]
+			run itunibo.robot.resourceModelSupport.updateRoomModel( myself, payloadArg(1), Inv)
+			
+			solve( showRoomState )		
+			
+			forward butler_solver -m actionComplete : actionComplete( ok )
+			
+		}
+	} Goto wait
+	
+	State handleSwapAction{
+		onMsg ( swap : swap(INVENTARIO1 , INVENTARIO2, NOME , CATEGORIA ) ){
+			printCurrentMessage
+						
+			solve ( sposta( $payloadArg(0), $payloadArg(1), $payloadArg(2), $payloadArg(3) ) )			
+			
+			solve ( assert( done( handleSwap, $payloadArg(0), $payloadArg(1), $payloadArg(2), $payloadArg(3) ) ) )  // testing function
+			
+			solve( inventario($payloadArg(0), L ))				
+			["var Inv = getCurSol(\"L\").toString()"]
+			run itunibo.robot.resourceModelSupport.updateRoomModel( myself, payloadArg(0), Inv)
+			
+			solve( inventario($payloadArg(1), L ))				
+			["Inv = getCurSol(\"L\").toString()"]
+			run itunibo.robot.resourceModelSupport.updateRoomModel( myself, payloadArg(1), Inv)
+						
+			solve( showRoomState )	
+			
+			forward butler_solver -m actionComplete : actionComplete( ok )
+		}
+	} Goto wait
+	
+	State handleRemoveAction{
+		onMsg ( remove : remove( INVENTARIO , NOME , CATEGORIA ) ){	
+			printCurrentMessage
+			["messageRecognized=true"]
+					
+			solve ( rimuovi( $payloadArg(0), $payloadArg(1), $payloadArg(2) ) )
+			
+			solve ( assert( done( handleRemove, $payloadArg(0), $payloadArg(1), $payloadArg(2) ) ) )  // testing function
+			
+			solve( inventario($payloadArg(0), L ))				
+			["var Inv = getCurSol(\"L\").toString()"]
+			run itunibo.robot.resourceModelSupport.updateRoomModel( myself, payloadArg(1), Inv)
+			
+			solve( showRoomState )	
+			
+			forward butler_solver -m actionComplete : actionComplete( ok )
+		}
+	} Goto wait
+					
+	State completeAction{
+		onMsg(actionComplete : actionComplete( ok )){
+			printCurrentMessage			
+		}
+		onMsg(actionComplete : actionComplete( fail )){
+			printCurrentMessage
+			
+			solve( retractAllActions)
+			solve( assert( azione(movimento, home, null, null, null )))
+		}
+		onMsg(actionContinue : actionContinue( CMD, ARG1 )){
+			printCurrentMessage
+			
+			solve( continua( $payloadArg(0), $payloadArg(1) ))				
+			println(currentSolution)
+			
+		}	
+	} Goto solveAction
+	
+	State stoppedSolvedAction{		
+		printCurrentMessage		
+		
+		solve( aggiornaStato( stoppedSolvedAction ))
+				
+	} Transition t0 whenEvent reactivateAppl -> restartSolvedAction
+	
+	State restartSolvedAction{	
+		printCurrentMessage		
+				
+		solve (assert( done ( restartSolvedAction ) ) )
+		
+		solve( aggiornaStato( restartSolvedAction ))
+		
+	}Goto wait
+}
+
+QActor butler_fridge_handler context ctxButler{
+	State s0 initial {
+		solve( consult("sysRules.pl")	 ) 
+	}Goto wait
+	
+	State wait{		
+	} Transition t0 whenMsg msgFridge -> handleMsgFridge
+					whenMsg replyFridge -> handleReply
+	
+	State handleMsgFridge{
+		onMsg ( msgFridge : msgFridge( ACTION, NAME, CATEGORY ) ){
+			printCurrentMessage 
+			solve ( retract( currentFood( _ ) ) )
+			solve ( assert( currentFood( $payloadArg(1) ) ) )
+			
+			forward fridge -m msgFridge : msgFridge( $payloadArg(0), $payloadArg(1), $payloadArg(2) )
+			
+			solve ( assert( done( actionMsgFridgeSync, $payloadArg(0), $payloadArg(1), $payloadArg(2) ) ) )  // testing function			
+		}		
+	} Goto wait
+	
+	State handleReply{
+		onMsg( replyFridge : replyFridge(present)){		
+			forward butler_solver -m actionComplete : actionComplete ( ok )
+			printCurrentMessage					
+		}
+		onMsg( replyFridge : replyFridge(null)){	
+			forward butler_solver -m actionComplete : actionComplete ( ok )	
+			printCurrentMessage				
+		}	
+		onMsg( replyFridge : replyFridge(absent)){
+			printCurrentMessage
+			
+			solve( currentFood( CIBO ))	
+			["val Cibo= getCurSol(\"CIBO\").toString()"]
+			
+			run itunibo.robot.resourceModelSupport.updateMissingFoodModel( myself, Cibo )
+			forward butler_solver -m actionComplete : actionComplete ( fail )
+		}
+	} Goto wait
+	
+	 
+}
+
+
+QActor butler_test_handler context ctxButler{
+	State s0 initial {
+		solve( consult("sysRules.pl")	 ) 
+	}Goto waitAction
+	
+	State waitAction{	
+	} Transition t0 whenMsg 	check -> handleCheck
+					whenMsg		wait -> handleWait
+		
+	State handleCheck{				
+		onMsg( check : check( NUMBER ) ){			
+			printCurrentMessage
+			
+			solve ( assert( done ( check , $payloadArg(0) ) ) )
+			forward butler_solver -m actionComplete : actionComplete ( ok )
+		}		
+	}Goto waitAction
+	
+	State handleWait{
+		onMsg( wait : wait( TIME ) ){			
+			printCurrentMessage
+			
+			solve ( assert( done ( wait , $payloadArg(0) ) ) )
+			["delay(payloadArg(0).toLong()*2000)"]
+			
+			forward butler_solver -m actionComplete : actionComplete  ( ok )		
+		}
+	}Goto waitAction
+}
+
+//-----------------------------------------------------------------
+//----------------------------FRIDGE-------------------------------
+//-----------------------------------------------------------------
+
+QActor fridge context ctxButler {
+	
+	State s0 initial {
+		solve( consult("sysRules.pl")	 ) 	
+		      
+		solve( consult("fridgeModel.pl")	 ) 
+		
+		solve( consult("dataFunctions.pl")	 ) 
+		
+		solve( showResourceModel ) 			
+		
+		//run itunibo.coap.modelResourceCoap.create( myself, "resourcemodel" ) //CoAP access	
+		
+		emit exposeFood : exposeFood	
+	}Goto waitCmd
+	
+	State waitCmd {		
+	} Transition t0 whenEvent 	msgFridge -> handleMsgFridge
+					whenEvent	exposeFood -> exposeFood
+					
+	State handleMsgFridge{		
+		["storeCurrentMessageForReply()"]
+		
+		onMsg ( msgFridge : msgFridge( aggiungi, NAME, CATEGORY ) ) {
+			printCurrentMessage
+			solve ( assert( received( $payloadArg(0), $payloadArg(1), $payloadArg(2) ) ) ) // testing function
+			
+			solve( aggiungi( frigoInv, $payloadArg(1) , $payloadArg(2)) )			
+			solve( assert(done(handleAdd, $payloadArg(1) , $payloadArg(2) ))) // testing
+			
+			solve( showResourceModel ) 		
+			
+			solve( inventario(frigoInv, L ))				
+			["val Inventario = getCurSol(\"L\").toString()"]			
+			run itunibo.robot.resourceModelSupport.updateFridgeModel( myself, Inventario)
+			
+			["replyToCaller(\"replyFridge\", \"replyFridge(null)\")"]
+		}
+		onMsg ( msgFridge : msgFridge( rimuovi, NAME, CATEGORY ) ) {
+			printCurrentMessage
+			solve ( assert( received( $payloadArg(0), $payloadArg(1), $payloadArg(2) ) ) ) // testing function
+			
+			solve( rimuovi( frigoInv, $payloadArg(1) , $payloadArg(2)) )			
+			solve( assert(done(handleRemove, $payloadArg(1) , $payloadArg(2) ))) // testing
+			solve( showResourceModel ) 		
+			
+			
+			solve( inventario(frigoInv, L ))				
+			["val Inventario = getCurSol(\"L\").toString()"]			
+			run itunibo.robot.resourceModelSupport.updateFridgeModel( myself, Inventario)
+			
+			["replyToCaller(\"replyFridge\", \"replyFridge(null)\")"]
+		}
+		onMsg ( msgFridge : msgFridge( conferma, NAME, CATEGORY ) ) {
+			printCurrentMessage
+			solve ( assert( received( $payloadArg(0), $payloadArg(1), $payloadArg(2) ) ) ) // testing function
+			
+					
+			solve( assert(done(handleQuery, $payloadArg(1) , $payloadArg(2) ))) // testing
+			solve( presenza(frigoInv, $payloadArg(1),$payloadArg(2)) )
+			
+			ifSolved {
+				["replyToCaller(\"replyFridge\", \"replyFridge(present)\")"]
+			} else {				
+				["replyToCaller(\"replyFridge\", \"replyFridge(absent)\")"]
+			}
+			
+		}
+		onMsg ( msgFridge : msgFridge( null, NAME, CATEGORY ) ) {
+			printCurrentMessage
+			
+			solve ( assert( received( $payloadArg(0), $payloadArg(1), $payloadArg(2) ) ) ) 
+			
+			["replyToCaller(\"replyFridge\", \"replyFridge(null})\")"]
+			
+		}
+	} Goto waitCmd
+	
+	State exposeFood{
+		onMsg( exposeFood : exposeFood){
+			printCurrentMessage
+			
+			solve( assert( received( exposeFood) ) ) //testing
+			
+			solve( inventario( frigoInv , INVENTORY ) )
+			
+			solve( inventario(frigoInv, L ))				
+			["val Inventario = getCurSol(\"L\").toString()"]			
+			run itunibo.robot.resourceModelSupport.updateFridgeModel( myself, Inventario)
+				
+			emit modelContent :  modelContent( frigo (Inventario) ) //testing
+		}
+	}Goto waitCmd
+}
+//-----------------------------------------------------------------
+//--------------------TESTING DUMMYS-------------------------------
+//-----------------------------------------------------------------
+
+
+QActor frontend_dummy context ctxButler{
+	State s0 initial{
+		solve( consult("sysRules.pl")	 ) 		 
+	} Goto waitEvent
+	
+	State waitEvent{		
+	} Transition t0 whenMsg missingFood -> persistMissingFood
+					whenMsg modelContent -> persistModelContent
+	
+	State persistMissingFood{
+			solve( assert( missingFood ) )
+	} Goto waitEvent
+	
+	State persistModelContent{
+		onMsg ( modelContent : modelContent( CONTENT )  ){
+			printCurrentMessage
+			
+			solve( assert( content( content )  ) )
+		}
+	} Goto waitEvent
+}
